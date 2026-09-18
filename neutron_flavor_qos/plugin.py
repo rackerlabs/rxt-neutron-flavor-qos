@@ -66,6 +66,14 @@ class FlavorQosServicePlugin(service_base.ServicePluginBase):
                 updated_port, dict):
             return
 
+        if self._is_unbinding_transition(original_port, updated_port):
+            try:
+                self._clear_flavor_qos_policy(payload.context, updated_port)
+            except Exception:
+                LOG.exception("Failed to clear QoS for port %s",
+                              updated_port.get("id"))
+            return
+
         if not self._is_binding_transition(original_port, updated_port):
             return
 
@@ -111,6 +119,25 @@ class FlavorQosServicePlugin(service_base.ServicePluginBase):
             old_device_id != new_device_id
             or not self._is_managed_device_owner(old_device_owner)
             or (not old_host and bool(new_host))
+        )
+
+    def _is_unbinding_transition(self, original_port, updated_port):
+        if self._is_internal_enforcement_update(original_port, updated_port):
+            return False
+
+        new_device_id = updated_port.get("device_id")
+        if new_device_id:
+            return False
+
+        device_owner = updated_port.get("device_owner") or ""
+        if self._is_managed_device_owner(device_owner):
+            return False
+
+        old_device_owner = original_port.get("device_owner") or ""
+        old_device_id = original_port.get("device_id")
+        return (
+            self._is_managed_device_owner(old_device_owner) and
+            bool(old_device_id)
         )
 
     def _is_managed_device_owner(self, device_owner):
@@ -202,6 +229,30 @@ class FlavorQosServicePlugin(service_base.ServicePluginBase):
         )
         LOG.info("Applied flavor QoS policy %(policy_id)s to port %(port_id)s",
                  {"policy_id": qos_policy_id, "port_id": port["id"]})
+
+    def _clear_flavor_qos_policy(self, request_context, port):
+        if not port.get("qos_policy_id"):
+            LOG.debug("Port %s has no QoS policy to clear on unbind",
+                      port["id"])
+            return
+
+        core_plugin = directory.get_plugin()
+        if core_plugin is None:
+            LOG.warning(
+                "Core plugin is not available; leaving port %(port_id)s "
+                "QoS policy on unbind",
+                {"port_id": port["id"]},
+            )
+            return
+
+        admin_context = self._admin_context(request_context)
+        core_plugin.update_port(
+            admin_context,
+            port["id"],
+            {"port": {"qos_policy_id": None}},
+        )
+        LOG.info("Cleared QoS policy from unbound port %(port_id)s",
+                 {"port_id": port["id"]})
 
     def _admin_context(self, request_context):
         if request_context:

@@ -366,6 +366,155 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
         self.plugin._flavor_qos_policy_exists.assert_not_called()
         self.plugin._apply_flavor_qos_policy.assert_not_called()
 
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_after_port_update_clears_policy_on_unbind(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        original = self._port(device_id=server_id,
+                              device_owner="compute:nova",
+                              **{"binding:host_id": "compute-01",
+                                 "qos_policy_id": "policy-id"})
+        updated = self._port(**{"qos_policy_id": "policy-id"})
+        ctxt = mock.Mock()
+        self.plugin._clear_flavor_qos_policy = mock.Mock()
+        self.plugin._resolve_flavor_qos_policy_id = mock.Mock()
+
+        self.plugin._after_port_update(
+            None, None, None, self._payload(original, updated, ctxt))
+
+        self.plugin._clear_flavor_qos_policy.assert_called_once_with(
+            ctxt, updated)
+        self.plugin._resolve_flavor_qos_policy_id.assert_not_called()
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_after_port_update_noops_when_unbind_clears_no_policy(self,
+                                                                 conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        original = self._port(device_id=server_id,
+                              device_owner="compute:nova")
+        updated = self._port()
+        self.plugin._clear_flavor_qos_policy = mock.Mock()
+
+        self.plugin._after_port_update(
+            None, None, None, self._payload(original, updated))
+
+        # _clear_flavor_qos_policy still runs the no-policy noop internally
+        self.plugin._clear_flavor_qos_policy.assert_called_once_with(
+            None, updated)
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_after_port_update_logs_unbind_clear_error(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        original = self._port(device_id=server_id,
+                              device_owner="compute:nova")
+        updated = self._port()
+        self.plugin._clear_flavor_qos_policy = mock.Mock(
+            side_effect=RuntimeError("db is unavailable"))
+
+        with mock.patch("neutron_flavor_qos.plugin.LOG") as log:
+            self.plugin._after_port_update(
+                None, None, None, self._payload(original, updated))
+
+        log.exception.assert_called_once()
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_unbinding_transition_matches_managed_to_unmanaged(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        original = self._port(device_id=server_id,
+                              device_owner="compute:nova",
+                              **{"binding:host_id": "compute-01"})
+        updated = self._port(**{"binding:host_id": None})
+
+        self.assertTrue(
+            self.plugin._is_unbinding_transition(original, updated))
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_unbinding_transition_ignores_still_bound_update(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        original = self._port(device_id=server_id,
+                              device_owner="compute:nova",
+                              **{"binding:host_id": "compute-01"})
+        updated = self._port(device_id=server_id,
+                             device_owner="compute:nova",
+                             **{"binding:host_id": "compute-02"})
+
+        self.assertFalse(
+            self.plugin._is_unbinding_transition(original, updated))
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_unbinding_transition_ignores_user_port_update(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        original = self._port()
+        updated = self._port(device_owner="")
+
+        self.assertFalse(
+            self.plugin._is_unbinding_transition(original, updated))
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_unbinding_transition_ignores_non_managed_owner(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        original = self._port(device_id="router-id",
+                              device_owner="network:router_interface",
+                              **{"binding:host_id": "compute-01"})
+        updated = self._port(device_owner="")
+
+        self.assertFalse(
+            self.plugin._is_unbinding_transition(original, updated))
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_internal_unbind_qos_update_is_ignored(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        original = self._port(device_id=server_id,
+                              device_owner="compute:nova",
+                              **{"qos_policy_id": "policy-id"})
+        updated = self._port(device_id=server_id,
+                             device_owner="compute:nova",
+                             **{"qos_policy_id": None})
+
+        self.assertFalse(
+            self.plugin._is_unbinding_transition(original, updated))
+
+    @mock.patch("neutron_flavor_qos.plugin.directory.get_plugin")
+    def test_clear_flavor_qos_policy_updates_port(self, get_plugin):
+        core_plugin = mock.Mock()
+        get_plugin.return_value = core_plugin
+        ctxt = mock.Mock()
+        ctxt.elevated.return_value = "admin-context"
+
+        self.plugin._clear_flavor_qos_policy(
+            ctxt, self._port(qos_policy_id="policy-id"))
+
+        core_plugin.update_port.assert_called_once_with(
+            "admin-context",
+            "port-id",
+            {"port": {"qos_policy_id": None}},
+        )
+
+    @mock.patch("neutron_flavor_qos.plugin.directory.get_plugin")
+    def test_clear_flavor_qos_policy_noops_when_policy_already_none(
+            self, get_plugin):
+        with mock.patch("neutron_flavor_qos.plugin.LOG") as log:
+            self.plugin._clear_flavor_qos_policy(mock.Mock(), self._port())
+
+        get_plugin.assert_not_called()
+        log.debug.assert_called_once()
+
+    @mock.patch("neutron_flavor_qos.plugin.directory.get_plugin")
+    def test_clear_flavor_qos_policy_noops_when_core_plugin_missing(
+            self, get_plugin):
+        get_plugin.return_value = None
+
+        with mock.patch("neutron_flavor_qos.plugin.LOG") as log:
+            self.plugin._clear_flavor_qos_policy(
+                mock.Mock(), self._port(qos_policy_id="policy-id"))
+
+        log.warning.assert_called_once()
+
     @mock.patch("neutron_flavor_qos.plugin.directory.get_plugin")
     def test_flavor_qos_policy_exists_uses_qos_service_plugin(
             self, get_plugin):
