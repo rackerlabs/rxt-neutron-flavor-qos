@@ -94,6 +94,40 @@ supported for compute workloads. Operators should treat the Nova flavor extra
 spec as the source of truth and prevent tenants from attaching, replacing, or
 removing port QoS policies through `qos_policy_id`.
 
+## Unbinding and Deletion Cleanup
+
+When a port is detached from a managed server (device identity cleared), or
+when a bound managed port is deleted, the plugin clears the port's
+`qos_policy_id` back to `None`. This prevents a flavor-selected policy from
+carrying over to a later, unrelated attach of the same port.
+
+## Manual Enablement Task
+
+Enabling `flavor_qos` only affects future binding transitions. Ports that were
+already bound to servers before the plugin was enabled are not retrofitted
+automatically. To reconcile them, for each bound compute port apply the QoS
+policy declared on the server's flavor:
+
+```bash
+# List bound compute ports missing the flavor-selected policy
+openstack port list --device-owner "compute:*" --long \
+  | awk '{print $2, $NF}'
+
+# For each port, set the policy from the server flavor's extra spec
+openstack flavor show <flavor> --column flavor_qos_policy_id
+openstack port set <port-id> --qos-policy <qos-policy-uuid>
+```
+
+## Per-Port QoS Semantics
+
+The flavor's `flavor_qos_policy_id` is applied **per attached port**, not per
+server. A multi-NIC instance receives the policy on every NIC, so the
+flavor-declared limit is the per-interface ceiling: a 1 Gbps policy on a
+three-NIC server allows up to 3 Gbps aggregate throughput. To express a
+per-server total, the operator must choose the flavor policy value
+accordingly (for example, the per-NIC share of the intended total) or accept
+per-interface enforcement.
+
 ## Missing Flavor Metadata
 
 If the bound server's flavor does not define `flavor_qos_policy_id`, the plugin

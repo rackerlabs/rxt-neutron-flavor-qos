@@ -266,6 +266,116 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
         self.assertFalse(
             self.plugin._is_binding_transition(original, updated))
 
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_before_port_delete_clears_policy_on_managed_port(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        port = self._port(device_id=server_id,
+                          device_owner="compute:nova",
+                          **{"binding:host_id": "compute-01",
+                             "qos_policy_id": "policy-id"})
+        ctxt = mock.Mock()
+        payload = mock.Mock(states=[port], context=ctxt)
+        self.plugin._clear_flavor_qos_policy = mock.Mock()
+
+        self.plugin._before_port_delete(None, None, None, payload)
+
+        self.plugin._clear_flavor_qos_policy.assert_called_once_with(
+            ctxt, port)
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_before_port_delete_ignores_port_without_policy(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        port = self._port(device_id=server_id, device_owner="compute:nova")
+        payload = mock.Mock(states=[port], context=mock.Mock())
+        self.plugin._clear_flavor_qos_policy = mock.Mock()
+
+        self.plugin._before_port_delete(None, None, None, payload)
+
+        self.plugin._clear_flavor_qos_policy.assert_not_called()
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_before_port_delete_ignores_unmanaged_owner(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        port = self._port(device_id="router-id",
+                          device_owner="network:router_interface",
+                          **{"qos_policy_id": "policy-id"})
+        payload = mock.Mock(states=[port], context=mock.Mock())
+        self.plugin._clear_flavor_qos_policy = mock.Mock()
+
+        self.plugin._before_port_delete(None, None, None, payload)
+
+        self.plugin._clear_flavor_qos_policy.assert_not_called()
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_before_port_delete_ignores_unbound_device_id(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        port = self._port(**{"qos_policy_id": "policy-id"})
+        payload = mock.Mock(states=[port], context=mock.Mock())
+        self.plugin._clear_flavor_qos_policy = mock.Mock()
+
+        self.plugin._before_port_delete(None, None, None, payload)
+
+        self.plugin._clear_flavor_qos_policy.assert_not_called()
+
+    def test_before_port_delete_noops_without_payload(self):
+        self.plugin._clear_flavor_qos_policy = mock.Mock()
+
+        self.plugin._before_port_delete(None, None, None, None)
+
+        self.plugin._clear_flavor_qos_policy.assert_not_called()
+
+    def test_before_port_delete_noops_with_malformed_state(self):
+        payload = mock.Mock(states=[None], context=mock.Mock())
+        self.plugin._clear_flavor_qos_policy = mock.Mock()
+
+        self.plugin._before_port_delete(None, None, None, payload)
+
+        self.plugin._clear_flavor_qos_policy.assert_not_called()
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_before_port_delete_logs_cleanup_error(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        port = self._port(device_id=server_id,
+                          device_owner="compute:nova",
+                          **{"qos_policy_id": "policy-id"})
+        payload = mock.Mock(states=[port], context=mock.Mock())
+        self.plugin._clear_flavor_qos_policy = mock.Mock(
+            side_effect=RuntimeError("db is unavailable"))
+
+        with mock.patch("neutron_flavor_qos.plugin.LOG") as log:
+            self.plugin._before_port_delete(None, None, None, payload)
+
+        log.exception.assert_called_once()
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_binding_transition_matches_host_change_migration(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        original = self._port(device_id=server_id,
+                              device_owner="compute:nova",
+                              **{"binding:host_id": "compute-01"})
+        updated = self._port(device_id=server_id,
+                             device_owner="compute:nova",
+                             **{"binding:host_id": "compute-02"})
+
+        self.assertTrue(
+            self.plugin._is_binding_transition(original, updated))
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_binding_transition_ignores_repeated_identical_bind(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        port = self._port(device_id=server_id,
+                          device_owner="compute:nova",
+                          **{"binding:host_id": "compute-01",
+                             "binding:vnic_type": "normal"})
+
+        self.assertFalse(
+            self.plugin._is_binding_transition(port, port))
+
     def test_resolve_flavor_qos_policy_id_from_extra_spec(self):
         self.plugin._nova_client = mock.Mock()
         self.plugin._nova_client.get_server_flavor_extra_specs.return_value = {

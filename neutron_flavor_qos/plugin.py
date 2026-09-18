@@ -55,6 +55,35 @@ class FlavorQosServicePlugin(service_base.ServicePluginBase):
     def get_plugin_description(self):
         return "Nova flavor based port QoS enforcement service plugin"
 
+    @registry.receives(resources.PORT, [events.BEFORE_DELETE])
+    def _before_port_delete(self, resource, event, trigger, payload=None):
+        if not payload or not payload.states:
+            return
+
+        port = payload.states[0]
+        if not isinstance(port, dict):
+            return
+
+        if not self._is_delete_cleanup_candidate(port):
+            return
+
+        try:
+            self._clear_flavor_qos_policy(payload.context, port)
+        except Exception:
+            LOG.exception("Failed to clear QoS for deleted port %s",
+                          port.get("id"))
+
+    def _is_delete_cleanup_candidate(self, port):
+        if not port.get("qos_policy_id"):
+            return False
+
+        device_id = port.get("device_id")
+        if not device_id or not uuidutils.is_uuid_like(device_id):
+            return False
+
+        device_owner = port.get("device_owner") or ""
+        return self._is_managed_device_owner(device_owner)
+
     @registry.receives(resources.PORT, [events.AFTER_UPDATE])
     def _after_port_update(self, resource, event, trigger, payload=None):
         if not payload or not payload.states:
@@ -112,13 +141,18 @@ class FlavorQosServicePlugin(service_base.ServicePluginBase):
         if not self._is_managed_device_owner(device_owner):
             return False
 
+        # A managed compute binding already on a host is only re-evaluated if
+        # Nova rebinds the port to a different host (migration) or a different
+        # server (re-attach). Repeated PUTs that repeat the same binding are
+        # ignored so each host bind performs at most one Nova lookup and one
+        # Neutron QoS write.
         old_device_owner = original_port.get("device_owner") or ""
         old_host = original_port.get("binding:host_id")
         new_host = updated_port.get("binding:host_id")
         return (
             old_device_id != new_device_id
             or not self._is_managed_device_owner(old_device_owner)
-            or (not old_host and bool(new_host))
+            or (old_host != new_host and bool(new_host))
         )
 
     def _is_unbinding_transition(self, original_port, updated_port):
