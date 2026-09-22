@@ -47,11 +47,31 @@ Set the Neutron QoS policy ID directly on the Nova flavor:
 
 ```bash
 openstack flavor set m1.large \
-  --property flavor_qos_policy_id=<qos-policy-uuid>
+  --property "flavor_qos:policy_id=<qos-policy-uuid>"
 ```
 
-The plugin reads only the `flavor_qos_policy_id` extra spec. The value must be
+The plugin reads only the `flavor_qos:policy_id` extra spec. The value must be
 the UUID of an existing Neutron QoS policy.
+
+The namespace is required for Nova scheduler compatibility. Nova's
+`AggregateInstanceExtraSpecsFilter` treats unnamespaced flavor extra specs as
+host aggregate metadata requirements, which can reject every compute host with
+`NoValidHost`. The `flavor_qos:` namespace is intentionally distinct from
+Nova's scheduler-owned namespaces, so Nova ignores the key while this plugin
+consumes it.
+
+Remove the old unnamespaced key from any existing flavors before setting the
+namespaced key:
+
+```bash
+openstack flavor unset <flavor> --property flavor_qos_policy_id
+openstack flavor set <flavor> \
+  --property "flavor_qos:policy_id=<qos-policy-uuid>"
+```
+
+The plugin does not fall back to `flavor_qos_policy_id`. Keeping that key on a
+flavor can cause Nova scheduling to fail even if the namespaced key is also
+present.
 
 ## Neutron Configuration
 
@@ -96,10 +116,28 @@ removing port QoS policies through `qos_policy_id`.
 
 ## Unbinding and Deletion Cleanup
 
-When a port is detached from a managed server (device identity cleared), or
-when a bound managed port is deleted, the plugin clears the port's
-`qos_policy_id` back to `None`. This prevents a flavor-selected policy from
-carrying over to a later, unrelated attach of the same port.
+The plugin clears a port's `qos_policy_id` back to `None` on two transitions,
+so a flavor-selected policy never carries over to a later, unrelated attach of
+the same port.
+
+**Unbind (AFTER_UPDATE).** When a port's device identity is cleared
+(`device_id` / `device_owner` stripped, port no longer owned by a managed
+prefix), the plugin clears the policy. This covers manual detach and the
+tenant-supplied-port deletion path.
+
+**Delete (BEFORE_DELETE).** When a port that is still bound to a managed server
+and still carries a policy is deleted, the plugin clears the policy before the
+row is removed. This covers the Nova-auto-created port path: during instance
+deletion, Nova deletes ports it created for the server (the `--nic net-id=...`
+and `--auto-network` forms) directly, without first unbinding them, so the
+unbind transition never fires for those ports.
+
+The two paths are complementary. Nova's `deallocate_for_instance` unbinds
+tenant-supplied / preexisting ports (cleared by the AFTER_UPDATE path) and
+deletes auto-created ports in place (cleared by the BEFORE_DELETE path).
+
+Both handlers are exception-guarded: a failure to clear the policy is logged
+and never blocks the underlying port update or deletion.
 
 ## Manual Enablement Task
 
@@ -114,13 +152,13 @@ openstack port list --device-owner "compute:*" --long \
   | awk '{print $2, $NF}'
 
 # For each port, set the policy from the server flavor's extra spec
-openstack flavor show <flavor> --column flavor_qos_policy_id
+openstack flavor show <flavor> --column properties
 openstack port set <port-id> --qos-policy <qos-policy-uuid>
 ```
 
 ## Per-Port QoS Semantics
 
-The flavor's `flavor_qos_policy_id` is applied **per attached port**, not per
+The flavor's `flavor_qos:policy_id` is applied **per attached port**, not per
 server. A multi-NIC instance receives the policy on every NIC, so the
 flavor-declared limit is the per-interface ceiling: a 1 Gbps policy on a
 three-NIC server allows up to 3 Gbps aggregate throughput. To express a
@@ -130,7 +168,7 @@ per-interface enforcement.
 
 ## Missing Flavor Metadata
 
-If the bound server's flavor does not define `flavor_qos_policy_id`, the plugin
+If the bound server's flavor does not define `flavor_qos:policy_id`, the plugin
 logs a warning and leaves the port QoS unchanged. If the referenced Neutron QoS
 policy UUID does not exist, the plugin also logs a warning and leaves the port
 QoS unchanged. Nova lookup failures, invalid UUID values, and Neutron port

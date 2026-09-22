@@ -29,7 +29,7 @@ class NovaFlavorClientTestCase(unittest.TestCase):
             }),
             self._response({
                 "extra_specs": {
-                    "flavor_qos_policy_id": (
+                    "flavor_qos:policy_id": (
                         "75c29b54-721d-4387-8f66-0057c8c5ed28"),
                 },
             }),
@@ -40,7 +40,7 @@ class NovaFlavorClientTestCase(unittest.TestCase):
 
         self.assertEqual(
             {
-                "flavor_qos_policy_id": (
+                "flavor_qos:policy_id": (
                     "75c29b54-721d-4387-8f66-0057c8c5ed28"),
             },
             extra_specs)
@@ -126,7 +126,7 @@ class NovaFlavorClientTestCase(unittest.TestCase):
             self._response({"server": {"flavor": {"id": "m1.large"}}}),
             self._response({
                 "extra_specs": {
-                    "flavor_qos_policy_id": (
+                    "flavor_qos:policy_id": (
                         "75c29b54-721d-4387-8f66-0057c8c5ed28"),
                 },
             }),
@@ -139,7 +139,7 @@ class NovaFlavorClientTestCase(unittest.TestCase):
 
         self.assertEqual(
             {
-                "flavor_qos_policy_id": (
+                "flavor_qos:policy_id": (
                     "75c29b54-721d-4387-8f66-0057c8c5ed28"),
             },
             first)

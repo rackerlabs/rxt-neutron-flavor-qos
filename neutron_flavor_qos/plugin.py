@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from neutron_lib.api.definitions import qos as qos_apidef
 from neutron_lib.callbacks import events
 from neutron_lib.callbacks import registry
 from neutron_lib.callbacks import resources
@@ -37,7 +38,11 @@ LOG = logging.getLogger(__name__)
 class FlavorQosServicePlugin(service_base.ServicePluginBase):
     """Reconcile bound compute ports to flavor-selected QoS policies."""
 
-    required_service_plugins = [plugin_constants.QOS]
+    # Neutron treats these values as providers in the
+    # ``neutron.service_plugins`` entry-point namespace.  The provider alias
+    # is lower-case ``qos``; plugin_constants.QOS (``QOS``) is instead the
+    # type used to look up the already-loaded plugin in the directory.
+    required_service_plugins = [qos_apidef.ALIAS]
     supported_extension_aliases = []
     _filter_validation_support = True
     path_prefix = ""
@@ -57,10 +62,13 @@ class FlavorQosServicePlugin(service_base.ServicePluginBase):
 
     @registry.receives(resources.PORT, [events.BEFORE_DELETE])
     def _before_port_delete(self, resource, event, trigger, payload=None):
-        if not payload or not payload.states:
+        if not payload:
             return
 
-        port = payload.states[0]
+        # ML2 publishes BEFORE_DELETE with the port in payload.metadata
+        # (states is empty for this event). The full port dict, including
+        # qos_policy_id, device_id, and device_owner, lives there.
+        port = (payload.metadata or {}).get("port")
         if not isinstance(port, dict):
             return
 

@@ -13,4 +13,4 @@
 # limitations under the License.
 
 PLUGIN_TYPE = "flavor_qos"
-NOVA_FLAVOR_QOS_POLICY_EXTRA_SPEC = "flavor_qos_policy_id"
+NOVA_FLAVOR_QOS_POLICY_EXTRA_SPEC = "flavor_qos:policy_id"
