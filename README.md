@@ -96,10 +96,28 @@ removing port QoS policies through `qos_policy_id`.
 
 ## Unbinding and Deletion Cleanup
 
-When a port is detached from a managed server (device identity cleared), or
-when a bound managed port is deleted, the plugin clears the port's
-`qos_policy_id` back to `None`. This prevents a flavor-selected policy from
-carrying over to a later, unrelated attach of the same port.
+The plugin clears a port's `qos_policy_id` back to `None` on two transitions,
+so a flavor-selected policy never carries over to a later, unrelated attach of
+the same port.
+
+**Unbind (AFTER_UPDATE).** When a port's device identity is cleared
+(`device_id` / `device_owner` stripped, port no longer owned by a managed
+prefix), the plugin clears the policy. This covers manual detach and the
+tenant-supplied-port deletion path.
+
+**Delete (BEFORE_DELETE).** When a port that is still bound to a managed server
+and still carries a policy is deleted, the plugin clears the policy before the
+row is removed. This covers the Nova-auto-created port path: during instance
+deletion, Nova deletes ports it created for the server (the `--nic net-id=...`
+and `--auto-network` forms) directly, without first unbinding them, so the
+unbind transition never fires for those ports.
+
+The two paths are complementary. Nova's `deallocate_for_instance` unbinds
+tenant-supplied / preexisting ports (cleared by the AFTER_UPDATE path) and
+deletes auto-created ports in place (cleared by the BEFORE_DELETE path).
+
+Both handlers are exception-guarded: a failure to clear the policy is logged
+and never blocks the underlying port update or deletion.
 
 ## Manual Enablement Task
 
