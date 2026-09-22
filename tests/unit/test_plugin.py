@@ -275,7 +275,7 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
                           **{"binding:host_id": "compute-01",
                              "qos_policy_id": "policy-id"})
         ctxt = mock.Mock()
-        payload = mock.Mock(states=[port], context=ctxt)
+        payload = mock.Mock(metadata={"port": port}, context=ctxt)
         self.plugin._clear_flavor_qos_policy = mock.Mock()
 
         self.plugin._before_port_delete(None, None, None, payload)
@@ -288,7 +288,7 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
         conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
         server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
         port = self._port(device_id=server_id, device_owner="compute:nova")
-        payload = mock.Mock(states=[port], context=mock.Mock())
+        payload = mock.Mock(metadata={"port": port}, context=mock.Mock())
         self.plugin._clear_flavor_qos_policy = mock.Mock()
 
         self.plugin._before_port_delete(None, None, None, payload)
@@ -301,7 +301,7 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
         port = self._port(device_id="router-id",
                           device_owner="network:router_interface",
                           **{"qos_policy_id": "policy-id"})
-        payload = mock.Mock(states=[port], context=mock.Mock())
+        payload = mock.Mock(metadata={"port": port}, context=mock.Mock())
         self.plugin._clear_flavor_qos_policy = mock.Mock()
 
         self.plugin._before_port_delete(None, None, None, payload)
@@ -312,7 +312,7 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
     def test_before_port_delete_ignores_unbound_device_id(self, conf):
         conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
         port = self._port(**{"qos_policy_id": "policy-id"})
-        payload = mock.Mock(states=[port], context=mock.Mock())
+        payload = mock.Mock(metadata={"port": port}, context=mock.Mock())
         self.plugin._clear_flavor_qos_policy = mock.Mock()
 
         self.plugin._before_port_delete(None, None, None, payload)
@@ -327,7 +327,7 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
         self.plugin._clear_flavor_qos_policy.assert_not_called()
 
     def test_before_port_delete_noops_with_malformed_state(self):
-        payload = mock.Mock(states=[None], context=mock.Mock())
+        payload = mock.Mock(metadata={"port": None}, context=mock.Mock())
         self.plugin._clear_flavor_qos_policy = mock.Mock()
 
         self.plugin._before_port_delete(None, None, None, payload)
@@ -341,7 +341,7 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
         port = self._port(device_id=server_id,
                           device_owner="compute:nova",
                           **{"qos_policy_id": "policy-id"})
-        payload = mock.Mock(states=[port], context=mock.Mock())
+        payload = mock.Mock(metadata={"port": port}, context=mock.Mock())
         self.plugin._clear_flavor_qos_policy = mock.Mock(
             side_effect=RuntimeError("db is unavailable"))
 

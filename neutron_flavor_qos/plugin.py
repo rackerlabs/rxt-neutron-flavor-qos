@@ -57,10 +57,13 @@ class FlavorQosServicePlugin(service_base.ServicePluginBase):
 
     @registry.receives(resources.PORT, [events.BEFORE_DELETE])
     def _before_port_delete(self, resource, event, trigger, payload=None):
-        if not payload or not payload.states:
+        if not payload:
             return
 
-        port = payload.states[0]
+        # ML2 publishes BEFORE_DELETE with the port in payload.metadata
+        # (states is empty for this event). The full port dict, including
+        # qos_policy_id, device_id, and device_owner, lives there.
+        port = (payload.metadata or {}).get("port")
         if not isinstance(port, dict):
             return
 
