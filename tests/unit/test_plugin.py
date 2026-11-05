@@ -671,6 +671,31 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
             self.plugin._get_changed_nova_flavor_id(original, updated),
         )
 
+    def test_revert_flavor_with_same_migration_is_trusted(self):
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        migration_uuid = "5a8473d1-6ad6-4422-a075-04f342c329c9"
+        original = self._port(
+            device_id=server_id,
+            **{"binding:profile": {
+                "nova_flavor_id": (
+                    "d99ebe55-988d-41d5-a387-4fce42aadb68"),
+                "nova_flavor_instance_uuid": server_id,
+                "nova_flavor_migration_uuid": migration_uuid,
+            }})
+        reverted_flavor_id = "a9f1fa9f-c4a4-43f1-a1c6-b1fca3cf9e42"
+        updated = self._port(
+            device_id=server_id,
+            **{"binding:profile": {
+                "nova_flavor_id": reverted_flavor_id,
+                "nova_flavor_instance_uuid": server_id,
+                "nova_flavor_migration_uuid": migration_uuid,
+            }})
+
+        self.assertEqual(
+            reverted_flavor_id,
+            self.plugin._get_changed_nova_flavor_id(original, updated),
+        )
+
     def test_flavor_marker_without_migration_uuid_is_not_trusted(self):
         server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
         original = self._port(device_id=server_id)

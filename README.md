@@ -107,11 +107,12 @@ QoS policy exists through the enabled QoS service plugin.
 ### Resize-safe Nova binding profile
 
 The `rxt-nova-flavor-qos` adapter can publish the target public flavor ID after
-Nova's stock network migration. When the migration UUID changes and the
-companion instance UUID matches the port's `device_id`, the plugin reads that
-flavor's extra specs directly instead of first reading the server. This avoids
-the resize race where Nova updates the Neutron binding before it persists the
-new flavor on the server record.
+Nova's stock network migration. When the companion instance UUID matches the
+port's `device_id`, the migration UUID is valid, and either the migration UUID
+or flavor ID changes, the plugin reads that flavor's extra specs directly
+instead of first reading the server. This avoids the resize race where Nova
+updates the Neutron binding before it persists the new flavor on the server
+record.
 
 ```json
 {
@@ -123,11 +124,11 @@ new flavor on the server record.
 }
 ```
 
-The changed migration UUID is treated as a binding transition. Every resize
+A changed migration UUID is treated as a binding transition. Every new resize
 generation is therefore reconciled even if it remains on the same compute host
-or its target flavor matches a marker left by an earlier resize. Resize revert
-works through the same path because the adapter supplies the restored old
-flavor and a new migration UUID.
+or its target flavor matches a marker left by an earlier resize. Nova reuses
+the resize migration UUID during revert, so a changed flavor ID with the same
+valid migration UUID is also trusted for the restored flavor.
 
 ### Fail-open contract
 
