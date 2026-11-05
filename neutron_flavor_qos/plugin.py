@@ -12,14 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+
 from neutron_lib.api.definitions import qos as qos_apidef
 from neutron_lib.callbacks import events
 from neutron_lib.callbacks import registry
 from neutron_lib.callbacks import resources
-from neutron_lib.exceptions import qos as qos_exc
 from neutron_lib import context as n_context
-from neutron_lib.plugins import directory
+from neutron_lib.exceptions import qos as qos_exc
 from neutron_lib.plugins import constants as plugin_constants
+from neutron_lib.plugins import directory
 from neutron_lib.services import base as service_base
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -62,24 +64,25 @@ class FlavorQosServicePlugin(service_base.ServicePluginBase):
 
     @registry.receives(resources.PORT, [events.BEFORE_DELETE])
     def _before_port_delete(self, resource, event, trigger, payload=None):
-        if not payload:
-            return
-
-        # ML2 publishes BEFORE_DELETE with the port in payload.metadata
-        # (states is empty for this event). The full port dict, including
-        # qos_policy_id, device_id, and device_owner, lives there.
-        port = (payload.metadata or {}).get("port")
-        if not isinstance(port, dict):
-            return
-
-        if not self._is_delete_cleanup_candidate(port):
-            return
-
+        port = None
         try:
+            if not payload:
+                return
+
+            # ML2 publishes BEFORE_DELETE with the port in payload.metadata
+            # (states is empty for this event). The full port dict, including
+            # qos_policy_id, device_id, and device_owner, lives there.
+            port = (payload.metadata or {}).get("port")
+            if not isinstance(port, dict):
+                return
+
+            if not self._is_delete_cleanup_candidate(port):
+                return
+
             self._clear_flavor_qos_policy(payload.context, port)
         except Exception:
             LOG.exception("Failed to clear QoS for deleted port %s",
-                          port.get("id"))
+                          port.get("id") if isinstance(port, dict) else None)
 
     def _is_delete_cleanup_candidate(self, port):
         if not port.get("qos_policy_id"):
@@ -94,28 +97,28 @@ class FlavorQosServicePlugin(service_base.ServicePluginBase):
 
     @registry.receives(resources.PORT, [events.AFTER_UPDATE])
     def _after_port_update(self, resource, event, trigger, payload=None):
-        if not payload or not payload.states:
-            return
-
-        original_port = payload.states[0]
-        updated_port = payload.latest_state
-        if not isinstance(original_port, dict) or not isinstance(
-                updated_port, dict):
-            return
-
-        if self._is_unbinding_transition(original_port, updated_port):
-            try:
-                self._clear_flavor_qos_policy(payload.context, updated_port)
-            except Exception:
-                LOG.exception("Failed to clear QoS for port %s",
-                              updated_port.get("id"))
-            return
-
-        if not self._is_binding_transition(original_port, updated_port):
-            return
-
+        updated_port = None
         try:
-            qos_policy_id = self._resolve_flavor_qos_policy_id(updated_port)
+            if not payload or not payload.states:
+                return
+
+            original_port = payload.states[0]
+            updated_port = payload.latest_state
+            if not isinstance(original_port, dict) or not isinstance(
+                    updated_port, dict):
+                return
+
+            if self._is_unbinding_transition(original_port, updated_port):
+                self._clear_flavor_qos_policy(payload.context, updated_port)
+                return
+
+            if not self._is_binding_transition(original_port, updated_port):
+                return
+
+            changed_flavor_id = self._get_changed_nova_flavor_id(
+                original_port, updated_port)
+            qos_policy_id = self._resolve_flavor_qos_policy_id(
+                updated_port, changed_flavor_id)
             if not qos_policy_id:
                 return
             if not self._flavor_qos_policy_exists(payload.context,
@@ -127,11 +130,17 @@ class FlavorQosServicePlugin(service_base.ServicePluginBase):
         except exceptions.FlavorQosMetadataInvalid as exc:
             LOG.warning(
                 "%(error)s; leaving port %(port_id)s QoS unchanged",
-                {"error": exc, "port_id": updated_port.get("id")},
+                {
+                    "error": exc,
+                    "port_id": (updated_port.get("id") if isinstance(
+                        updated_port, dict) else None),
+                },
             )
         except Exception:
-            LOG.exception("Failed to enforce QoS for port %s",
-                          updated_port.get("id"))
+            LOG.exception(
+                "Failed to process flavor QoS for port %s; continuing",
+                updated_port.get("id") if isinstance(
+                    updated_port, dict) else None)
 
     def _is_binding_transition(self, original_port, updated_port):
         if self._is_internal_enforcement_update(original_port, updated_port):
@@ -150,17 +159,25 @@ class FlavorQosServicePlugin(service_base.ServicePluginBase):
             return False
 
         # A managed compute binding already on a host is only re-evaluated if
-        # Nova rebinds the port to a different host (migration) or a different
-        # server (re-attach). Repeated PUTs that repeat the same binding are
-        # ignored so each host bind performs at most one Nova lookup and one
-        # Neutron QoS write.
+        # Nova rebinds the port to a different host (migration), a different
+        # server (re-attach), or records a new resize generation. Repeated
+        # PUTs that repeat the same binding generation are ignored.
         old_device_owner = original_port.get("device_owner") or ""
         old_host = original_port.get("binding:host_id")
         new_host = updated_port.get("binding:host_id")
+        old_flavor_id = self._get_bound_nova_flavor_id(original_port)
+        new_flavor_id = self._get_bound_nova_flavor_id(updated_port)
+        old_migration_uuid = self._get_bound_nova_flavor_migration_uuid(
+            original_port)
+        new_migration_uuid = self._get_bound_nova_flavor_migration_uuid(
+            updated_port)
         return (
             old_device_id != new_device_id
             or not self._is_managed_device_owner(old_device_owner)
             or (old_host != new_host and bool(new_host))
+            or (old_flavor_id != new_flavor_id and bool(new_flavor_id))
+            or (old_migration_uuid != new_migration_uuid
+                and bool(new_migration_uuid))
         )
 
     def _is_unbinding_transition(self, original_port, updated_port):
@@ -197,19 +214,85 @@ class FlavorQosServicePlugin(service_base.ServicePluginBase):
             updated_port.get("device_owner")
         )
 
-    def _resolve_flavor_qos_policy_id(self, port):
-        extra_specs = self._nova_client.get_server_flavor_extra_specs(
-            port["device_id"])
+    def _get_bound_nova_flavor_id(self, port):
+        binding_profile = port.get("binding:profile") or {}
+        if not isinstance(binding_profile, dict):
+            return None
+        flavor_id = binding_profile.get(
+            constants.NOVA_FLAVOR_ID_BINDING_PROFILE_KEY)
+        if flavor_id is None:
+            return None
+        flavor_id = str(flavor_id).strip()
+        return flavor_id or None
+
+    def _get_bound_nova_flavor_instance_uuid(self, port):
+        binding_profile = port.get("binding:profile") or {}
+        if not isinstance(binding_profile, dict):
+            return None
+        instance_uuid = binding_profile.get(
+            constants.NOVA_FLAVOR_INSTANCE_UUID_BINDING_PROFILE_KEY)
+        if instance_uuid is None:
+            return None
+        instance_uuid = str(instance_uuid).strip()
+        return instance_uuid or None
+
+    def _get_bound_nova_flavor_migration_uuid(self, port):
+        binding_profile = port.get("binding:profile") or {}
+        if not isinstance(binding_profile, dict):
+            return None
+        migration_uuid = binding_profile.get(
+            constants.NOVA_FLAVOR_MIGRATION_UUID_BINDING_PROFILE_KEY)
+        if migration_uuid is None:
+            return None
+        migration_uuid = str(migration_uuid).strip()
+        return migration_uuid or None
+
+    def _get_changed_nova_flavor_id(self, original_port, updated_port):
+        """Return a direct flavor marker for a new resize generation.
+
+        The migration UUID makes each publication unique even when a stale
+        marker already contains the target flavor. The instance UUID prevents
+        a marker retained across detach/reattach from being trusted for
+        another server. Incomplete, malformed, or repeated marker sets fall
+        back to the normal Nova server lookup.
+        """
+        new_flavor_id = self._get_bound_nova_flavor_id(updated_port)
+        if not new_flavor_id:
+            return None
+
+        marker_instance_uuid = self._get_bound_nova_flavor_instance_uuid(
+            updated_port)
+        if marker_instance_uuid != updated_port.get("device_id"):
+            return None
+
+        old_migration_uuid = self._get_bound_nova_flavor_migration_uuid(
+            original_port)
+        new_migration_uuid = self._get_bound_nova_flavor_migration_uuid(
+            updated_port)
+        if (not uuidutils.is_uuid_like(new_migration_uuid)
+                or old_migration_uuid == new_migration_uuid):
+            return None
+        return new_flavor_id
+
+    def _resolve_flavor_qos_policy_id(self, port, flavor_id=None):
+        if flavor_id:
+            extra_specs = self._nova_client.get_flavor_extra_specs(flavor_id)
+            flavor_description = "Nova flavor %s" % flavor_id
+        else:
+            extra_specs = self._nova_client.get_server_flavor_extra_specs(
+                port["device_id"])
+            flavor_description = "Nova flavor for server %s" % port[
+                "device_id"]
         extra_spec_key = constants.NOVA_FLAVOR_QOS_POLICY_EXTRA_SPEC
         qos_policy_id = extra_specs.get(extra_spec_key)
         if qos_policy_id:
             qos_policy_id = qos_policy_id.strip()
         if not qos_policy_id:
             LOG.warning(
-                "Nova flavor for server %(server_id)s does not define "
+                "%(flavor)s does not define "
                 "%(key)s; leaving port %(port_id)s QoS unchanged",
                 {
-                    "server_id": port["device_id"],
+                    "flavor": flavor_description,
                     "key": extra_spec_key,
                     "port_id": port["id"],
                 },
@@ -273,8 +356,27 @@ class FlavorQosServicePlugin(service_base.ServicePluginBase):
                  {"policy_id": qos_policy_id, "port_id": port["id"]})
 
     def _clear_flavor_qos_policy(self, request_context, port):
-        if not port.get("qos_policy_id"):
-            LOG.debug("Port %s has no QoS policy to clear on unbind",
+        updates = {}
+        if port.get("qos_policy_id"):
+            updates["qos_policy_id"] = None
+
+        binding_profile = port.get("binding:profile") or {}
+        if isinstance(binding_profile, dict):
+            cleaned_profile = copy.deepcopy(binding_profile)
+            removed_marker = False
+            for key in (
+                constants.NOVA_FLAVOR_ID_BINDING_PROFILE_KEY,
+                constants.NOVA_FLAVOR_INSTANCE_UUID_BINDING_PROFILE_KEY,
+                constants.NOVA_FLAVOR_MIGRATION_UUID_BINDING_PROFILE_KEY,
+            ):
+                if key in cleaned_profile:
+                    del cleaned_profile[key]
+                    removed_marker = True
+            if removed_marker:
+                updates["binding:profile"] = cleaned_profile
+
+        if not updates:
+            LOG.debug("Port %s has no flavor QoS state to clear on unbind",
                       port["id"])
             return
 
@@ -291,9 +393,9 @@ class FlavorQosServicePlugin(service_base.ServicePluginBase):
         core_plugin.update_port(
             admin_context,
             port["id"],
-            {"port": {"qos_policy_id": None}},
+            {"port": updates},
         )
-        LOG.info("Cleared QoS policy from unbound port %(port_id)s",
+        LOG.info("Cleared flavor QoS state from unbound port %(port_id)s",
                  {"port_id": port["id"]})
 
     def _admin_context(self, request_context):

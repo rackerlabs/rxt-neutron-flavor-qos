@@ -1,9 +1,9 @@
-from unittest import mock
 import unittest
+from unittest import mock
 
 from neutron_lib.api.definitions import qos as qos_apidef
-from neutron_lib.plugins import constants as plugin_constants
 from neutron_lib.exceptions import qos as qos_exc
+from neutron_lib.plugins import constants as plugin_constants
 from neutron_lib.services import base as service_base
 
 from neutron_flavor_qos import exceptions
@@ -24,6 +24,7 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
             "device_id": "",
             "device_owner": "",
             "binding:host_id": None,
+            "binding:profile": {},
             "binding:vnic_type": "normal",
             "qos_policy_id": None,
         }
@@ -73,9 +74,52 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
             None, None, None, self._payload(original, updated, ctxt))
 
         self.plugin._resolve_flavor_qos_policy_id.assert_called_once_with(
-            updated)
+            updated, None)
         self.plugin._flavor_qos_policy_exists.assert_called_once_with(
             ctxt, updated, "policy-id")
+        self.plugin._apply_flavor_qos_policy.assert_called_once_with(
+            ctxt, updated, "policy-id")
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_after_port_update_uses_new_resize_generation(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        target_flavor_id = "d99ebe55-988d-41d5-a387-4fce42aadb68"
+        old_migration_uuid = "dfd89f21-8f52-45f6-9ff0-71cde33482ab"
+        new_migration_uuid = "5a8473d1-6ad6-4422-a075-04f342c329c9"
+        original = self._port(
+            device_id=server_id,
+            device_owner="compute:nova",
+            **{
+                "binding:host_id": "compute-01",
+                "binding:profile": {
+                    "nova_flavor_id": target_flavor_id,
+                    "nova_flavor_instance_uuid": server_id,
+                    "nova_flavor_migration_uuid": old_migration_uuid,
+                },
+            })
+        updated = self._port(
+            device_id=server_id,
+            device_owner="compute:nova",
+            **{
+                "binding:host_id": "compute-01",
+                "binding:profile": {
+                    "nova_flavor_id": target_flavor_id,
+                    "nova_flavor_instance_uuid": server_id,
+                    "nova_flavor_migration_uuid": new_migration_uuid,
+                },
+            })
+        ctxt = mock.Mock()
+        self.plugin._resolve_flavor_qos_policy_id = mock.Mock(
+            return_value="policy-id")
+        self.plugin._flavor_qos_policy_exists = mock.Mock(return_value=True)
+        self.plugin._apply_flavor_qos_policy = mock.Mock()
+
+        self.plugin._after_port_update(
+            None, None, None, self._payload(original, updated, ctxt))
+
+        self.plugin._resolve_flavor_qos_policy_id.assert_called_once_with(
+            updated, target_flavor_id)
         self.plugin._apply_flavor_qos_policy.assert_called_once_with(
             ctxt, updated, "policy-id")
 
@@ -174,6 +218,58 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
                 None, None, None, self._payload(original, updated))
 
         self.plugin._apply_flavor_qos_policy.assert_not_called()
+        log.exception.assert_called_once()
+
+    def test_after_port_update_fails_open_on_transition_error(self):
+        original = self._port()
+        updated = self._port()
+        self.plugin._is_unbinding_transition = mock.Mock(
+            side_effect=RuntimeError("malformed callback data"))
+
+        with mock.patch("neutron_flavor_qos.plugin.LOG") as log:
+            self.plugin._after_port_update(
+                None, None, None, self._payload(original, updated))
+
+        log.exception.assert_called_once()
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_after_port_update_fails_open_on_direct_flavor_lookup_error(
+            self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        flavor_id = "d99ebe55-988d-41d5-a387-4fce42aadb68"
+        original = self._port(
+            device_id=server_id,
+            device_owner="compute:nova",
+            **{
+                "binding:host_id": "compute-01",
+                "binding:profile": {
+                    "nova_flavor_id": flavor_id,
+                    "nova_flavor_instance_uuid": server_id,
+                    "nova_flavor_migration_uuid": (
+                        "dfd89f21-8f52-45f6-9ff0-71cde33482ab"),
+                },
+            })
+        updated = self._port(
+            device_id=server_id,
+            device_owner="compute:nova",
+            **{
+                "binding:host_id": "compute-01",
+                "binding:profile": {
+                    "nova_flavor_id": flavor_id,
+                    "nova_flavor_instance_uuid": server_id,
+                    "nova_flavor_migration_uuid": (
+                        "5a8473d1-6ad6-4422-a075-04f342c329c9"),
+                },
+            })
+        self.plugin._nova_client = mock.Mock()
+        self.plugin._nova_client.get_flavor_extra_specs.side_effect = (
+            RuntimeError("nova is unavailable"))
+
+        with mock.patch("neutron_flavor_qos.plugin.LOG") as log:
+            self.plugin._after_port_update(
+                None, None, None, self._payload(original, updated))
+
         log.exception.assert_called_once()
 
     @mock.patch("oslo_config.cfg.CONF")
@@ -354,6 +450,17 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
 
         log.exception.assert_called_once()
 
+    def test_before_port_delete_fails_open_on_candidate_check_error(self):
+        port = self._port(qos_policy_id="policy-id")
+        payload = mock.Mock(metadata={"port": port}, context=mock.Mock())
+        self.plugin._is_delete_cleanup_candidate = mock.Mock(
+            side_effect=RuntimeError("malformed callback data"))
+
+        with mock.patch("neutron_flavor_qos.plugin.LOG") as log:
+            self.plugin._before_port_delete(None, None, None, payload)
+
+        log.exception.assert_called_once()
+
     @mock.patch("oslo_config.cfg.CONF")
     def test_binding_transition_matches_host_change_migration(self, conf):
         conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
@@ -364,6 +471,66 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
         updated = self._port(device_id=server_id,
                              device_owner="compute:nova",
                              **{"binding:host_id": "compute-02"})
+
+        self.assertTrue(
+            self.plugin._is_binding_transition(original, updated))
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_binding_transition_matches_target_flavor_change(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        original = self._port(
+            device_id=server_id,
+            device_owner="compute:nova",
+            **{
+                "binding:host_id": "compute-01",
+                "binding:profile": {
+                    "nova_flavor_id": (
+                        "a9f1fa9f-c4a4-43f1-a1c6-b1fca3cf9e42")},
+            })
+        updated = self._port(
+            device_id=server_id,
+            device_owner="compute:nova",
+            **{
+                "binding:host_id": "compute-01",
+                "binding:profile": {
+                    "nova_flavor_id": (
+                        "d99ebe55-988d-41d5-a387-4fce42aadb68"),
+                    "nova_flavor_instance_uuid": server_id},
+            })
+
+        self.assertTrue(
+            self.plugin._is_binding_transition(original, updated))
+
+    @mock.patch("oslo_config.cfg.CONF")
+    def test_binding_transition_matches_new_resize_generation(self, conf):
+        conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        flavor_id = "d99ebe55-988d-41d5-a387-4fce42aadb68"
+        original = self._port(
+            device_id=server_id,
+            device_owner="compute:nova",
+            **{
+                "binding:host_id": "compute-01",
+                "binding:profile": {
+                    "nova_flavor_id": flavor_id,
+                    "nova_flavor_instance_uuid": server_id,
+                    "nova_flavor_migration_uuid": (
+                        "dfd89f21-8f52-45f6-9ff0-71cde33482ab"),
+                },
+            })
+        updated = self._port(
+            device_id=server_id,
+            device_owner="compute:nova",
+            **{
+                "binding:host_id": "compute-01",
+                "binding:profile": {
+                    "nova_flavor_id": flavor_id,
+                    "nova_flavor_instance_uuid": server_id,
+                    "nova_flavor_migration_uuid": (
+                        "5a8473d1-6ad6-4422-a075-04f342c329c9"),
+                },
+            })
 
         self.assertTrue(
             self.plugin._is_binding_transition(original, updated))
@@ -395,6 +562,147 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
         get_extra_specs = (
             self.plugin._nova_client.get_server_flavor_extra_specs)
         get_extra_specs.assert_called_once_with("server-id")
+
+    def test_resolve_flavor_qos_policy_id_from_bound_flavor(self):
+        flavor_id = "d99ebe55-988d-41d5-a387-4fce42aadb68"
+        policy_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        self.plugin._nova_client = mock.Mock()
+        self.plugin._nova_client.get_flavor_extra_specs.return_value = {
+            "flavor_qos:policy_id": policy_id,
+        }
+        port = self._port(**{
+            "binding:profile": {"nova_flavor_id": flavor_id},
+            "device_id": "server-id",
+        })
+
+        self.assertEqual(
+            policy_id,
+            self.plugin._resolve_flavor_qos_policy_id(port, flavor_id))
+
+        get_flavor_specs = self.plugin._nova_client.get_flavor_extra_specs
+        get_flavor_specs.assert_called_once_with(flavor_id)
+        get_server_specs = (
+            self.plugin._nova_client.get_server_flavor_extra_specs)
+        get_server_specs.assert_not_called()
+
+    def test_changed_flavor_marker_is_trusted_for_bound_instance(self):
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        old_flavor_id = "a9f1fa9f-c4a4-43f1-a1c6-b1fca3cf9e42"
+        new_flavor_id = "d99ebe55-988d-41d5-a387-4fce42aadb68"
+        original = self._port(
+            device_id=server_id,
+            **{"binding:profile": {
+                "nova_flavor_id": old_flavor_id,
+                "nova_flavor_instance_uuid": server_id,
+                "nova_flavor_migration_uuid": (
+                    "dfd89f21-8f52-45f6-9ff0-71cde33482ab"),
+            }})
+        updated = self._port(
+            device_id=server_id,
+            **{"binding:profile": {
+                "nova_flavor_id": new_flavor_id,
+                "nova_flavor_instance_uuid": server_id,
+                "nova_flavor_migration_uuid": (
+                    "5a8473d1-6ad6-4422-a075-04f342c329c9"),
+            }})
+
+        self.assertEqual(
+            new_flavor_id,
+            self.plugin._get_changed_nova_flavor_id(original, updated),
+        )
+
+    def test_unchanged_flavor_marker_falls_back_to_server_lookup(self):
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        profile = {
+            "nova_flavor_id": "d99ebe55-988d-41d5-a387-4fce42aadb68",
+            "nova_flavor_instance_uuid": server_id,
+            "nova_flavor_migration_uuid": (
+                "5a8473d1-6ad6-4422-a075-04f342c329c9"),
+        }
+        original = self._port(
+            device_id=server_id,
+            **{"binding:profile": profile})
+        updated = self._port(
+            device_id=server_id,
+            **{"binding:profile": profile})
+
+        self.assertIsNone(
+            self.plugin._get_changed_nova_flavor_id(original, updated))
+
+    def test_changed_flavor_marker_for_another_instance_is_not_trusted(self):
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        original = self._port(device_id=server_id)
+        updated = self._port(
+            device_id=server_id,
+            **{"binding:profile": {
+                "nova_flavor_id": (
+                    "d99ebe55-988d-41d5-a387-4fce42aadb68"),
+                "nova_flavor_instance_uuid": (
+                    "1ed81c40-1493-4373-960f-7dd06e7fdb26"),
+                "nova_flavor_migration_uuid": (
+                    "5a8473d1-6ad6-4422-a075-04f342c329c9"),
+            }})
+
+        self.assertIsNone(
+            self.plugin._get_changed_nova_flavor_id(original, updated))
+
+    def test_repeated_target_flavor_with_new_generation_is_trusted(self):
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        flavor_id = "d99ebe55-988d-41d5-a387-4fce42aadb68"
+        original = self._port(
+            device_id=server_id,
+            **{"binding:profile": {
+                "nova_flavor_id": flavor_id,
+                "nova_flavor_instance_uuid": server_id,
+                "nova_flavor_migration_uuid": (
+                    "dfd89f21-8f52-45f6-9ff0-71cde33482ab"),
+            }})
+        updated = self._port(
+            device_id=server_id,
+            **{"binding:profile": {
+                "nova_flavor_id": flavor_id,
+                "nova_flavor_instance_uuid": server_id,
+                "nova_flavor_migration_uuid": (
+                    "5a8473d1-6ad6-4422-a075-04f342c329c9"),
+            }})
+
+        self.assertEqual(
+            flavor_id,
+            self.plugin._get_changed_nova_flavor_id(original, updated),
+        )
+
+    def test_flavor_marker_without_migration_uuid_is_not_trusted(self):
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        original = self._port(device_id=server_id)
+        updated = self._port(
+            device_id=server_id,
+            **{"binding:profile": {
+                "nova_flavor_id": (
+                    "d99ebe55-988d-41d5-a387-4fce42aadb68"),
+                "nova_flavor_instance_uuid": server_id,
+            }})
+
+        self.assertIsNone(
+            self.plugin._get_changed_nova_flavor_id(original, updated))
+
+    def test_malformed_migration_uuid_is_not_trusted(self):
+        server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
+        original = self._port(device_id=server_id)
+        updated = self._port(
+            device_id=server_id,
+            **{"binding:profile": {
+                "nova_flavor_id": (
+                    "d99ebe55-988d-41d5-a387-4fce42aadb68"),
+                "nova_flavor_instance_uuid": server_id,
+                "nova_flavor_migration_uuid": "not-a-uuid",
+            }})
+
+        self.assertIsNone(
+            self.plugin._get_changed_nova_flavor_id(original, updated))
+
+    def test_get_bound_nova_flavor_id_ignores_malformed_profile(self):
+        self.assertIsNone(self.plugin._get_bound_nova_flavor_id(
+            self._port(**{"binding:profile": "not-a-dict"})))
 
     def test_resolve_flavor_qos_policy_id_strips_extra_spec_value(self):
         self.plugin._nova_client = mock.Mock()
@@ -517,8 +825,8 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
         self.plugin._resolve_flavor_qos_policy_id.assert_not_called()
 
     @mock.patch("oslo_config.cfg.CONF")
-    def test_after_port_update_noops_when_unbind_clears_no_policy(self,
-                                                                 conf):
+    def test_after_port_update_noops_when_unbind_clears_no_policy(
+            self, conf):
         conf.flavor_qos.managed_device_owner_prefixes = ["compute:"]
         server_id = "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"
         original = self._port(device_id=server_id,
@@ -626,7 +934,35 @@ class FlavorQosServicePluginTestCase(unittest.TestCase):
         )
 
     @mock.patch("neutron_flavor_qos.plugin.directory.get_plugin")
-    def test_clear_flavor_qos_policy_noops_when_policy_already_none(
+    def test_clear_flavor_qos_policy_removes_markers_and_preserves_profile(
+            self, get_plugin):
+        core_plugin = mock.Mock()
+        get_plugin.return_value = core_plugin
+        ctxt = mock.Mock()
+        ctxt.elevated.return_value = "admin-context"
+        port = self._port(**{
+            "binding:profile": {
+                "allocation": "rp-uuid",
+                "nova_flavor_id": (
+                    "d99ebe55-988d-41d5-a387-4fce42aadb68"),
+                "nova_flavor_instance_uuid": (
+                    "4e7d2eaa-4f42-44b0-bf2b-97e0521a89b2"),
+                "nova_flavor_migration_uuid": (
+                    "5a8473d1-6ad6-4422-a075-04f342c329c9"),
+            },
+        })
+
+        self.plugin._clear_flavor_qos_policy(ctxt, port)
+
+        core_plugin.update_port.assert_called_once_with(
+            "admin-context",
+            "port-id",
+            {"port": {"binding:profile": {"allocation": "rp-uuid"}}},
+        )
+        self.assertIn("nova_flavor_id", port["binding:profile"])
+
+    @mock.patch("neutron_flavor_qos.plugin.directory.get_plugin")
+    def test_clear_flavor_qos_policy_noops_when_state_already_clear(
             self, get_plugin):
         with mock.patch("neutron_flavor_qos.plugin.LOG") as log:
             self.plugin._clear_flavor_qos_policy(mock.Mock(), self._port())

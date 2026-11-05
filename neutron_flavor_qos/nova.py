@@ -38,7 +38,16 @@ class NovaFlavorClient:
                         server_id)
             return {}
 
-        return self._get_flavor_extra_specs(flavor_id)
+        return self.get_flavor_extra_specs(flavor_id)
+
+    def get_flavor_extra_specs(self, flavor_id):
+        flavor_path_id = parse.quote(str(flavor_id), safe="")
+        response = self._get_adapter().get(
+            "/flavors/%s/os-extra_specs" % flavor_path_id)
+        extra_specs = self._json_body(response).get("extra_specs", {})
+        if not isinstance(extra_specs, dict):
+            extra_specs = {}
+        return extra_specs
 
     def _get_server_flavor_id(self, server_id):
         server_path_id = parse.quote(str(server_id), safe="")
@@ -52,15 +61,6 @@ class NovaFlavorClient:
         if isinstance(flavor, str):
             return flavor
         return None
-
-    def _get_flavor_extra_specs(self, flavor_id):
-        flavor_path_id = parse.quote(str(flavor_id), safe="")
-        response = self._get_adapter().get(
-            "/flavors/%s/os-extra_specs" % flavor_path_id)
-        extra_specs = self._json_body(response).get("extra_specs", {})
-        if not isinstance(extra_specs, dict):
-            extra_specs = {}
-        return extra_specs
 
     def _json_body(self, response):
         body = response.json()

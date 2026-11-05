@@ -8,9 +8,9 @@ The plugin observes Neutron `PORT` `AFTER_UPDATE` callbacks. It ignores
 ordinary port updates and evaluates compute binding transitions, including
 ports that already have a server `device_id` before their first
 `binding:host_id` assignment. Once Nova binds the port to an instance, the
-plugin asks Nova for the server's flavor, reads that flavor's extra specs, and
-applies the declared QoS policy ID to the port with an elevated Neutron
-context.
+plugin reads the intended flavor's extra specs and applies the declared QoS
+policy ID to the port with an elevated Neutron context. With an unmodified
+Nova, it discovers the flavor by reading the server first.
 
 ## Why AFTER_UPDATE
 
@@ -37,7 +37,7 @@ openstack server create --auto-network
   -> Nova creates or updates Neutron ports
   -> Nova binds the ports
   -> AFTER_UPDATE fires
-  -> plugin reads the server's Nova flavor through Nova's API
+  -> plugin reads the intended Nova flavor's extra specs through Nova's API
   -> plugin applies the flavor-selected QoS policy to each bound port
 ```
 
@@ -95,12 +95,56 @@ valid_interfaces = internal,public
 managed_device_owner_prefixes = compute:
 ```
 
-The plugin uses these Keystone service credentials to make Nova API calls. It
-first reads the server to find its flavor ID, then reads that flavor's extra
-specs. The Neutron server process applies the port update with an elevated
-Neutron context, so it must also be able to update port `qos_policy_id`
-bindings. Before applying the policy, the plugin verifies that the referenced
-Neutron QoS policy exists through the enabled QoS service plugin.
+The plugin uses these Keystone service credentials to make Nova API calls. If
+the `rxt-nova-flavor-qos` compute adapter writes a new, instance-matched flavor
+marker in the binding profile, the plugin reads that flavor's extra specs
+directly. Otherwise, it first reads the server to discover the flavor ID. The
+Neutron server process applies the port update with an elevated Neutron
+context, so it must also be able to update port `qos_policy_id` bindings.
+Before applying the policy, the plugin verifies that the referenced Neutron
+QoS policy exists through the enabled QoS service plugin.
+
+### Resize-safe Nova binding profile
+
+The `rxt-nova-flavor-qos` adapter can publish the target public flavor ID after
+Nova's stock network migration. When the migration UUID changes and the
+companion instance UUID matches the port's `device_id`, the plugin reads that
+flavor's extra specs directly instead of first reading the server. This avoids
+the resize race where Nova updates the Neutron binding before it persists the
+new flavor on the server record.
+
+```json
+{
+  "binding:profile": {
+    "nova_flavor_id": "d99ebe55-988d-41d5-a387-4fce42aadb68",
+    "nova_flavor_instance_uuid": "2b3b27f3-e7f4-46f8-a48a-f999b1ad4317",
+    "nova_flavor_migration_uuid": "5a8473d1-6ad6-4422-a075-04f342c329c9"
+  }
+}
+```
+
+The changed migration UUID is treated as a binding transition. Every resize
+generation is therefore reconciled even if it remains on the same compute host
+or its target flavor matches a marker left by an earlier resize. Resize revert
+works through the same path because the adapter supplies the restored old
+flavor and a new migration UUID.
+
+### Fail-open contract
+
+The integration is always fail-open. The Nova adapter calls stock Nova
+networking first and suppresses every error from its additional marker update.
+The Neutron plugin also catches every error from marker processing, Nova API
+lookups, QoS policy validation, and port reconciliation. These errors are
+logged, but are never propagated into Nova's port operation.
+
+An incomplete, unchanged, instance-mismatched, or malformed marker set is not
+trusted for a direct flavor lookup. The plugin instead uses its original
+server-to-flavor Nova API path. If either that fallback or the direct flavor
+lookup fails, the callback leaves the port's existing `qos_policy_id`
+unchanged. Cleanup failures similarly leave the existing state in place and
+never block an unbind or delete. This deliberately prioritizes Nova and
+Neutron control-plane availability; operators must monitor the error logs and
+repair any port left with stale QoS after a transient failure.
 
 Required policy hardening when `flavor_qos` is enabled:
 
@@ -122,8 +166,10 @@ the same port.
 
 **Unbind (AFTER_UPDATE).** When a port's device identity is cleared
 (`device_id` / `device_owner` stripped, port no longer owned by a managed
-prefix), the plugin clears the policy. This covers manual detach and the
-tenant-supplied-port deletion path.
+prefix), the plugin clears the policy and all three Nova flavor marker fields.
+This covers manual detach and the tenant-supplied-port deletion path. The
+companion instance UUID also prevents a retained marker from being trusted if
+cleanup fails and the port is later attached to another server.
 
 **Delete (BEFORE_DELETE).** When a port that is still bound to a managed server
 and still carries a policy is deleted, the plugin clears the policy before the
