@@ -269,8 +269,11 @@ class FlavorQosServicePlugin(service_base.ServicePluginBase):
             original_port)
         new_migration_uuid = self._get_bound_nova_flavor_migration_uuid(
             updated_port)
-        if (not uuidutils.is_uuid_like(new_migration_uuid)
-                or old_migration_uuid == new_migration_uuid):
+        old_flavor_id = self._get_bound_nova_flavor_id(original_port)
+        if not uuidutils.is_uuid_like(new_migration_uuid):
+            return None
+        if (old_migration_uuid == new_migration_uuid
+                and old_flavor_id == new_flavor_id):
             return None
         return new_flavor_id
 
