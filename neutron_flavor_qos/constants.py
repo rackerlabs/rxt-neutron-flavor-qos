@@ -14,3 +14,10 @@
 
 PLUGIN_TYPE = "flavor_qos"
 NOVA_FLAVOR_QOS_POLICY_EXTRA_SPEC = "flavor_qos:policy_id"
+NOVA_FLAVOR_ID_BINDING_PROFILE_KEY = "nova_flavor_id"
+NOVA_FLAVOR_INSTANCE_UUID_BINDING_PROFILE_KEY = (
+    "nova_flavor_instance_uuid"
+)
+NOVA_FLAVOR_MIGRATION_UUID_BINDING_PROFILE_KEY = (
+    "nova_flavor_migration_uuid"
+)

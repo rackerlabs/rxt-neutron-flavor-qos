@@ -1,5 +1,5 @@
-from unittest import mock
 import unittest
+from unittest import mock
 
 from neutron_flavor_qos import config
 from neutron_flavor_qos import nova
@@ -157,14 +157,14 @@ class NovaFlavorClientTestCase(unittest.TestCase):
             "extra_specs": ["not", "a", "dict"],
         })
 
-        extra_specs = self.client._get_flavor_extra_specs("m1.large")
+        extra_specs = self.client.get_flavor_extra_specs("m1.large")
 
         self.assertEqual({}, extra_specs)
 
     def test_get_flavor_extra_specs_returns_empty_for_bad_json_body(self):
         self.adapter.get.return_value = self._response(["not", "a", "dict"])
 
-        extra_specs = self.client._get_flavor_extra_specs("m1.large")
+        extra_specs = self.client.get_flavor_extra_specs("m1.large")
 
         self.assertEqual({}, extra_specs)
 
